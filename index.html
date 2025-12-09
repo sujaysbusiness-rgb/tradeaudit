@@ -124,7 +124,6 @@
 
             // 1. EXTRACT ALL RAW TRANSACTIONS
             const transactions = [];
-
             const rows = lines.slice(1).map(line => line.split(',').map(c => c.trim()));
 
             rows.forEach(vals => {
@@ -174,39 +173,24 @@
 
             // 3. ROUND TRIP PROCESSING
             const completedTrades = [];
-            const openPositions = {}; // Map<SecurityName, { qty, entryTime, ... }>
+            const openPositions = {}; 
 
             transactions.forEach(txn => {
                 if (!openPositions[txn.sec]) {
-                    openPositions[txn.sec] = { 
-                        qty: 0, 
-                        netCashflow: 0, 
-                        charges: 0, 
-                        entryTime: txn.time, 
-                        exitTime: txn.time,
-                        maxQty: 0
-                    };
+                    openPositions[txn.sec] = { qty: 0, netCashflow: 0, charges: 0, entryTime: txn.time, exitTime: txn.time };
                 }
 
                 const pos = openPositions[txn.sec];
                 const amount = txn.qty * txn.price;
                 
-                // Update cashflow (Buy is neg, Sell is pos)
-                if (txn.isBuy) {
-                    pos.qty += txn.qty;
-                    pos.netCashflow -= amount;
-                } else {
-                    pos.qty -= txn.qty;
-                    pos.netCashflow += amount;
-                }
+                if (txn.isBuy) { pos.qty += txn.qty; pos.netCashflow -= amount; } 
+                else { pos.qty -= txn.qty; pos.netCashflow += amount; }
                 
-                // Update charges and time
                 pos.charges += txn.charges;
                 pos.netCashflow -= txn.charges; 
                 pos.exitTime = txn.time;
                 
                 if (Math.abs(pos.qty) < 0.0001) {
-                    // Position Closed -> Save Trade
                     completedTrades.push({
                         id: txn.sec,
                         netPnL: pos.netCashflow,
@@ -218,7 +202,6 @@
                         dayOfWeek: pos.exitTime.getDay(),
                         dateStr: pos.exitTime.toISOString().split('T')[0]
                     });
-
                     delete openPositions[txn.sec];
                 }
             });
@@ -234,7 +217,11 @@
             completedTrades.sort((a,b) => a.exitTime - b.exitTime);
 
             completedTrades.forEach(t => {
-                if (!monthlyStats[t.monthKey]) monthlyStats[t.monthKey] = { pnl:0, trades:0, wins:0 };
+                // Initialize monthly stats
+                if (!monthlyStats[t.monthKey]) {
+                    monthlyStats[t.monthKey] = { pnl: 0, trades: 0, wins: 0, sumWin: 0, sumLoss: 0 };
+                }
+                
                 monthlyStats[t.monthKey].pnl += t.netPnL;
                 monthlyStats[t.monthKey].trades++;
 
@@ -249,13 +236,20 @@
                 equityCurve.push({ x: t.dateStr, y: equity });
 
                 if (t.netPnL > 0) {
-                    wins++; sumWin += t.netPnL; 
+                    wins++; 
+                    sumWin += t.netPnL; 
                     monthlyStats[t.monthKey].wins++;
+                    monthlyStats[t.monthKey].sumWin += t.netPnL;
                     dayStats[t.dayOfWeek].wins++;
                 } else {
-                    losses++; sumLoss += Math.abs(t.netPnL);
+                    losses++; 
+                    sumLoss += Math.abs(t.netPnL);
+                    monthlyStats[t.monthKey].sumLoss += Math.abs(t.netPnL);
                 }
             });
+
+            // FIXED: Define totalPnL explicitly for the review engine
+            const totalPnL = equity; 
 
             const totalTrades = completedTrades.length;
             const winRate = totalTrades ? (wins/totalTrades)*100 : 0;
@@ -263,30 +257,59 @@
             const avgLoss = losses ? sumLoss/losses : 0;
             const profitFactor = sumLoss ? sumWin/sumLoss : 0;
             const expectancy = (winRate/100 * avgWin) - ((100-winRate)/100 * avgLoss);
+            const rrRatio = avgLoss > 0 ? avgWin / avgLoss : 0;
+            const avgTradesPerDay = totalTrades / (new Set(completedTrades.map(t => t.dateStr)).size || 1);
 
-            const suggestions = [];
-            if (profitFactor < 1) suggestions.push({ type: 'danger', text: "System is currently losing money. Prioritize capital preservation." });
-            if (maxDD < - (equity * 0.2) && equity > 0) suggestions.push({ type: 'warning', text: "High Drawdown detected. Consider reducing position size." });
-            
-            let worstDayIdx = -1;
-            let worstDayPnL = Infinity;
-            dayStats.forEach((d, i) => {
-                if (i > 0 && i < 6 && d.count > 3 && d.pnl < worstDayPnL) { 
-                    worstDayPnL = d.pnl;
-                    worstDayIdx = i;
-                }
-            });
-            if (worstDayPnL < 0) {
-                const days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
-                suggestions.push({ type: 'info', text: `You consistently lose money on ${days[worstDayIdx]}s. Consider avoiding this day.` });
+            // --- ADVANCED REVIEW ENGINE ---
+            const review = {
+                grade: "C",
+                title: "Developing",
+                color: "text-slate-600",
+                bg: "bg-slate-100",
+                strategic: [],
+                behavioral: [],
+                actionable: []
+            };
+
+            // 1. Grading (Using fixed totalPnL variable)
+            if (totalPnL > 0) {
+                if (profitFactor > 2.0 && maxDD > -(equity * 0.1)) { review.grade = "A+"; review.title = "Market Master"; review.color="text-emerald-600"; review.bg="bg-emerald-50"; }
+                else if (profitFactor > 1.5) { review.grade = "A"; review.title = "Solid Performer"; review.color="text-emerald-600"; review.bg="bg-emerald-50"; }
+                else if (profitFactor > 1.2) { review.grade = "B"; review.title = "Consistent"; review.color="text-blue-600"; review.bg="bg-blue-50"; }
+                else { review.grade = "B-"; review.title = "Marginally Profitable"; review.color="text-blue-600"; review.bg="bg-blue-50"; }
+            } else {
+                if (profitFactor > 0.8) { review.grade = "C"; review.title = "Breakeven Struggle"; review.color="text-orange-500"; review.bg="bg-orange-50"; }
+                else { review.grade = "D"; review.title = "Needs Overhaul"; review.color="text-rose-600"; review.bg="bg-rose-50"; }
             }
 
+            // 2. Strategic Analysis
+            if (winRate < 40 && rrRatio < 1.5) review.strategic.push("Critical Flaw: Your strategy has both low accuracy and low payout. You must either increase win rate to >50% or ensure winners are 2x losers.");
+            else if (winRate < 40 && rrRatio > 2.0) review.strategic.push("Sniper Profile: You have a low win rate but excellent R:R. This is stressful but profitable. Stick to the plan during losing streaks.");
+            else if (winRate > 60 && rrRatio < 0.8) review.strategic.push("Scalper Profile: High accuracy but one bad loss wipes out many wins. Tighten your Stop Loss immediately.");
+            else if (winRate > 50 && rrRatio > 1.5) review.strategic.push("Holy Grail Zone: You have found a sweet spot of accuracy and reward. Focus on scaling size slowly.");
+
+            // 3. Behavioral Patterns
+            if (avgTradesPerDay > 10) review.behavioral.push("Over-trading Alert: You are taking too many trades. Quality > Quantity. Are you chasing price?");
+            if (maxDD < -(equity * 0.25) && equity > 0) review.behavioral.push("Risk of Ruin: Your drawdown is too deep (-25%+). You are risking too much per trade. Cut size by half.");
+            
+            let worstDayIdx = -1, worstDayPnL = Infinity;
+            dayStats.forEach((d, i) => { if (i>0 && i<6 && d.count>3 && d.pnl < worstDayPnL) { worstDayPnL = d.pnl; worstDayIdx = i; } });
+            if (worstDayPnL < 0) {
+                const days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+                review.behavioral.push(`Calendar Leak: You have a specific weakness on ${days[worstDayIdx]}s. Is it expiry pressure or weekly fatigue?`);
+            }
+
+            // 4. Actionable Steps
+            if (profitFactor < 1.0) review.actionable.push("Stop Scaling: Do not increase capital until Profit Factor > 1.2 for 3 consecutive months.");
+            if (rrRatio < 1.0) review.actionable.push("Review Losers: Your average loss is bigger than your average win. Set a hard Stop Loss at the system level.");
+            else review.actionable.push("Optimize Winners: Your risk management is good. Try trailing stops to capture larger moves.");
+
             return {
-                trades: completedTrades, equityCurve, monthlyStats, dayStats, suggestions,
+                trades: completedTrades, equityCurve, monthlyStats, dayStats, review,
                 metrics: {
                     totalTrades, winRate, totalPnL: equity, maxDD,
                     avgWin, avgLoss, profitFactor,
-                    rrRatio: avgLoss ? avgWin/avgLoss : 0,
+                    rrRatio,
                     expectancy
                 },
                 hasCharges: idxs.charges !== -1
@@ -299,8 +322,7 @@
             <div className="card p-6 hover:shadow-lg transition relative has-tooltip group">
                 {desc && (
                     <div className="tooltip absolute z-10 p-3 -mt-16 text-sm text-white bg-slate-800 rounded shadow-lg max-w-xs left-0 right-0 mx-auto w-max text-center">
-                        {desc}
-                        <div className="w-2 h-2 bg-slate-800 rotate-45 mx-auto -mb-4 mt-1"></div>
+                        {desc} <div className="w-2 h-2 bg-slate-800 rotate-45 mx-auto -mb-4 mt-1"></div>
                     </div>
                 )}
                 <div className="flex justify-between items-center mb-3">
@@ -317,45 +339,68 @@
             </div>
         );
 
-        const ReviewSection = ({ metrics, suggestions }) => {
-            const { profitFactor, totalPnL } = metrics;
-            let title = "Balanced Performance", grade = "B", color = "text-blue-600", bg = "bg-blue-50";
-            
-            if (totalPnL < 0) { title = "Needs Optimization"; grade = "C"; color = "text-orange-600"; bg="bg-orange-50"; }
-            else if (profitFactor > 2) { title = "Excellent System"; grade = "A+"; color = "text-emerald-600"; bg="bg-emerald-50"; }
-
-            return (
-                <div className="card p-8 mb-8">
-                    <div className="flex flex-col md:flex-row gap-8">
-                        {/* Grade */}
-                        <div className="flex flex-col items-center justify-center min-w-[120px]">
-                            <div className={`w-20 h-20 rounded-2xl flex items-center justify-center text-4xl font-extrabold ${bg} border-4 border-white shadow-lg mb-2`}>
-                                <span className={color}>{grade}</span>
-                            </div>
-                            <span className="text-sm font-bold text-slate-400 uppercase">System Grade</span>
+        const DetailedReview = ({ review }) => (
+            <div className="card p-0 overflow-hidden mb-8 border-l-4 border-l-blue-600">
+                <div className="p-6 md:p-8 flex flex-col md:flex-row gap-8">
+                    {/* Scorecard */}
+                    <div className="flex flex-col items-center justify-center min-w-[140px] border-b md:border-b-0 md:border-r border-slate-100 pb-6 md:pb-0 md:pr-6">
+                        <div className={`w-24 h-24 rounded-2xl flex items-center justify-center text-5xl font-extrabold ${review.bg} border-4 border-white shadow-lg mb-3`}>
+                            <span className={review.color}>{review.grade}</span>
                         </div>
-                        
-                        {/* Suggestions */}
-                        <div className="flex-grow">
-                            <h3 className="text-xl font-bold text-slate-900 mb-4">{title}</h3>
-                            <div className="space-y-3">
-                                {suggestions.map((s, i) => (
-                                    <div key={i} className={`flex items-start gap-3 p-3 rounded-lg border ${s.type === 'danger' ? 'bg-rose-50 border-rose-100 text-rose-800' : s.type === 'warning' ? 'bg-amber-50 border-amber-100 text-amber-800' : 'bg-blue-50 border-blue-100 text-blue-800'}`}>
-                                        <Icon name={s.type === 'danger' ? 'alert-octagon' : s.type === 'warning' ? 'alert-triangle' : 'lightbulb'} size={18} className="mt-0.5" />
-                                        <p className="text-sm font-medium">{s.text}</p>
+                        <span className={`text-lg font-bold ${review.color}`}>{review.title}</span>
+                        <span className="text-xs text-slate-400 uppercase tracking-wide mt-1">Performance Grade</span>
+                    </div>
+
+                    {/* Detailed Insights */}
+                    <div className="flex-grow grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
+                        <div>
+                            <h4 className="flex items-center gap-2 font-bold text-slate-900 mb-3">
+                                <Icon name="crosshair" size={18} className="text-blue-600"/> Strategic Analysis
+                            </h4>
+                            <ul className="space-y-2">
+                                {review.strategic.map((text, i) => (
+                                    <li key={i} className="text-sm text-slate-600 leading-relaxed flex items-start gap-2">
+                                        <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-blue-400 flex-shrink-0"></span> {text}
+                                    </li>
+                                ))}
+                                {review.strategic.length === 0 && <li className="text-sm text-slate-400 italic">Insufficient data for strategic analysis.</li>}
+                            </ul>
+                        </div>
+
+                        <div>
+                            <h4 className="flex items-center gap-2 font-bold text-slate-900 mb-3">
+                                <Icon name="brain-circuit" size={18} className="text-purple-600"/> Behavioral Patterns
+                            </h4>
+                            <ul className="space-y-2">
+                                {review.behavioral.map((text, i) => (
+                                    <li key={i} className="text-sm text-slate-600 leading-relaxed flex items-start gap-2">
+                                        <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-purple-400 flex-shrink-0"></span> {text}
+                                    </li>
+                                ))}
+                                {review.behavioral.length === 0 && <li className="text-sm text-slate-400 italic">No negative behavioral patterns detected. Great discipline!</li>}
+                            </ul>
+                        </div>
+
+                        <div className="md:col-span-2 bg-slate-50 rounded-xl p-4 mt-2">
+                            <h4 className="flex items-center gap-2 font-bold text-slate-900 mb-2">
+                                <Icon name="check-square" size={18} className="text-emerald-600"/> Actionable Roadmap
+                            </h4>
+                            <div className="flex flex-col md:flex-row gap-4">
+                                {review.actionable.map((text, i) => (
+                                    <div key={i} className="flex-1 bg-white p-3 rounded-lg border border-slate-200 text-sm text-slate-700 shadow-sm">
+                                        <span className="font-bold text-emerald-600 mr-1">{i+1}.</span> {text}
                                     </div>
                                 ))}
-                                {suggestions.length === 0 && <p className="text-slate-500 text-sm">No critical warnings found. Keep up the consistency.</p>}
                             </div>
                         </div>
                     </div>
                 </div>
-            );
-        };
+            </div>
+        );
 
         const DayAnalysis = ({ stats }) => {
             const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-            const workWeekStats = stats.slice(1, 6); // Mon - Fri
+            const workWeekStats = stats.slice(1, 6); 
             const maxPnL = Math.max(...workWeekStats.map(s => Math.abs(s.pnl))) || 1;
             
             return (
@@ -368,26 +413,18 @@
                         {workWeekStats.map((s, i) => {
                             const height = (Math.abs(s.pnl) / maxPnL) * 100;
                             const displayHeight = Math.max(height, 2); 
-                            
                             return (
                                 <div key={i} className="w-1/5 h-full flex flex-col justify-end group relative">
                                     <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 opacity-0 group-hover:opacity-100 transition bg-slate-800 text-white text-xs py-1 px-2 rounded whitespace-nowrap z-10 pointer-events-none shadow-xl">
                                         ₹{s.pnl.toLocaleString()}
                                     </div>
-                                    <div 
-                                        className={`w-full rounded-t-md transition-all duration-500 relative ${s.pnl >= 0 ? 'bg-emerald-400 group-hover:bg-emerald-500' : 'bg-rose-400 group-hover:bg-rose-500'}`}
-                                        style={{ height: `${displayHeight}%` }}
-                                    >
-                                    </div>
+                                    <div className={`w-full rounded-t-md transition-all duration-500 relative ${s.pnl >= 0 ? 'bg-emerald-400 group-hover:bg-emerald-500' : 'bg-rose-400 group-hover:bg-rose-500'}`} style={{ height: `${displayHeight}%` }}></div>
                                 </div>
                             );
                         })}
                     </div>
-                    
                     <div className="flex gap-3 text-xs font-bold text-slate-400 text-center">
-                        {['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].map((day, i) => (
-                            <div key={i} className="w-1/5">{day}</div>
-                        ))}
+                        {['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].map((day, i) => <div key={i} className="w-1/5">{day}</div>)}
                     </div>
                 </div>
             );
@@ -409,6 +446,7 @@
                                     <th className="px-6 py-3">Month</th>
                                     <th className="px-6 py-3 text-right">Trades</th>
                                     <th className="px-6 py-3 text-right">Win Rate</th>
+                                    <th className="px-6 py-3 text-right">Avg R:R</th>
                                     <th className="px-6 py-3 text-right">Net P&L</th>
                                 </tr>
                             </thead>
@@ -416,11 +454,17 @@
                                 {months.map(m => {
                                     const s = stats[m];
                                     const wr = (s.wins / s.trades) * 100;
+                                    const losses = s.trades - s.wins;
+                                    const avgWin = s.wins > 0 ? s.sumWin / s.wins : 0;
+                                    const avgLoss = losses > 0 ? s.sumLoss / losses : 0;
+                                    const rr = avgLoss > 0 ? (avgWin / avgLoss).toFixed(2) : (avgWin > 0 ? '∞' : '0.00');
+
                                     return (
                                         <tr key={m} className="border-b last:border-0 hover:bg-slate-50 transition">
                                             <td className="px-6 py-3 font-bold text-slate-700">{m}</td>
                                             <td className="px-6 py-3 text-right text-slate-600">{s.trades}</td>
                                             <td className="px-6 py-3 text-right text-slate-600">{wr.toFixed(0)}%</td>
+                                            <td className="px-6 py-3 text-right text-slate-600">1 : {rr}</td>
                                             <td className={`px-6 py-3 text-right font-bold ${s.pnl >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
                                                 {s.pnl.toLocaleString('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 })}
                                             </td>
@@ -448,26 +492,16 @@
                     data: {
                         labels: curve.map(d => d.x),
                         datasets: [{ 
-                            label: 'Equity', 
-                            data: curve.map(d => d.y), 
-                            borderColor: '#2563eb', 
-                            backgroundColor: gradient, 
-                            fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2, pointHoverRadius: 6
+                            label: 'Equity', data: curve.map(d => d.y), borderColor: '#2563eb', backgroundColor: gradient, fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2, pointHoverRadius: 6
                         }]
                     },
-                    options: { 
-                        responsive: true, maintainAspectRatio: false, 
-                        plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false } }, 
-                        scales: { x: { display: false }, y: { border: { display: false }, grid: { color: '#f1f5f9' } } },
-                        interaction: { mode: 'nearest', axis: 'x', intersect: false }
-                    }
+                    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { border: { display: false }, grid: { color: '#f1f5f9' } } }, interaction: { mode: 'nearest', axis: 'x', intersect: false } }
                 });
                 return () => chart.destroy();
             }, [curve]);
             return <canvas ref={ref} />;
         };
 
-        // --- MAIN APP ---
         const App = () => {
             const [selectedBroker, setSelectedBroker] = useState(null);
             const [data, setData] = useState(null);
@@ -483,32 +517,21 @@
                         const result = parseTradeData(ev.target.result, selectedBroker);
                         setData(result);
                         setError(null);
-                    } catch (err) {
-                        setError(err.message);
-                        setData(null);
-                    }
+                    } catch (err) { setError(err.message); setData(null); }
                 };
                 reader.readAsText(file);
             };
 
             return (
                 <div className="min-h-screen pb-20 flex flex-col bg-slate-50/50">
-                    {/* NAV BAR */}
                     <nav className="glass border-b border-slate-200 sticky top-0 z-40">
                         <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
                             <div className="flex items-center gap-3">
-                                <div className="bg-slate-900 text-white p-2.5 rounded-xl shadow-lg shadow-slate-200">
-                                    <Icon name="bar-chart-big" size={24} />
-                                </div>
-                                <div>
-                                    <h1 className="font-extrabold text-xl text-slate-900 leading-none tracking-tight">Trade Audit Pro</h1>
-                                    <span className="text-[11px] font-bold text-blue-600 tracking-wide uppercase">by Trading With Sujay</span>
-                                </div>
+                                <div className="bg-slate-900 text-white p-2.5 rounded-xl shadow-lg shadow-slate-200"><Icon name="bar-chart-big" size={24} /></div>
+                                <div><h1 className="font-extrabold text-xl text-slate-900 leading-none tracking-tight">Trade Audit Pro</h1><span className="text-[11px] font-bold text-blue-600 tracking-wide uppercase">by Trading With Sujay</span></div>
                             </div>
                             {data && (
-                                <button onClick={() => { setData(null); setSelectedBroker(null); }} className="text-sm font-semibold text-slate-600 hover:text-blue-600 flex items-center gap-2 bg-white border border-slate-200 hover:bg-slate-50 px-4 py-2 rounded-lg shadow-sm transition">
-                                    <Icon name="plus" size={16} /> New Audit
-                                </button>
+                                <button onClick={() => { setData(null); setSelectedBroker(null); }} className="text-sm font-semibold text-slate-600 hover:text-blue-600 flex items-center gap-2 bg-white border border-slate-200 hover:bg-slate-50 px-4 py-2 rounded-lg shadow-sm transition"><Icon name="plus" size={16} /> New Audit</button>
                             )}
                         </div>
                     </nav>
@@ -517,44 +540,22 @@
                         {!data ? (
                             <div className="max-w-4xl mx-auto mt-16 px-6 animate-fade-in">
                                 <div className="text-center mb-12">
-                                    <h1 className="text-4xl md:text-5xl font-extrabold text-slate-900 mb-6 tracking-tight">
-                                        Professional Audit <br/> 
-                                        <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-indigo-600">For Your Trading Journal</span>
-                                    </h1>
-                                    <p className="text-lg text-slate-500 max-w-2xl mx-auto">
-                                        Upload your broker's CSV to get instant, actionable insights. Secure and private.
-                                    </p>
+                                    <h1 className="text-4xl md:text-5xl font-extrabold text-slate-900 mb-6 tracking-tight">Professional Audit <br/> <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-indigo-600">For Your Trading Journal</span></h1>
+                                    <p className="text-lg text-slate-500 max-w-2xl mx-auto">Upload your broker's CSV to get instant, actionable insights. Secure and private.</p>
                                 </div>
-
                                 <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-8 max-w-3xl mx-auto">
                                     {Object.entries(BROKERS).map(([key, conf]) => (
-                                        <div 
-                                            key={key} 
-                                            onClick={() => setSelectedBroker(key)}
-                                            className={`cursor-pointer p-4 rounded-xl border flex flex-col items-center gap-3 bg-white transition-all
-                                                ${selectedBroker === key ? 'border-blue-500 ring-2 ring-blue-100 shadow-md transform -translate-y-1' : 'border-slate-200 hover:border-blue-300 hover:shadow-sm'}
-                                            `}
-                                        >
-                                            <div className={`w-10 h-10 rounded-full flex items-center justify-center ${conf.bg} ${conf.color}`}>
-                                                <Icon name={key === 'kotak' ? 'infinity' : key === 'zerodha' ? 'zap' : 'bar-chart-2'} size={20} />
-                                            </div>
+                                        <div key={key} onClick={() => setSelectedBroker(key)} className={`cursor-pointer p-4 rounded-xl border flex flex-col items-center gap-3 bg-white transition-all ${selectedBroker === key ? 'border-blue-500 ring-2 ring-blue-100 shadow-md transform -translate-y-1' : 'border-slate-200 hover:border-blue-300 hover:shadow-sm'}`}>
+                                            <div className={`w-10 h-10 rounded-full flex items-center justify-center ${conf.bg} ${conf.color}`}><Icon name={key === 'kotak' ? 'infinity' : key === 'zerodha' ? 'zap' : 'bar-chart-2'} size={20} /></div>
                                             <span className="font-bold text-sm text-slate-700">{conf.name}</span>
                                         </div>
                                     ))}
                                 </div>
-
                                 {selectedBroker && (
                                     <div className="bg-white p-8 rounded-2xl border border-blue-100 shadow-xl shadow-blue-50/50 text-center max-w-lg mx-auto">
-                                        <div className="w-12 h-12 bg-blue-50 text-blue-600 rounded-xl flex items-center justify-center mx-auto mb-4">
-                                            <Icon name="upload-cloud" size={24} />
-                                        </div>
+                                        <div className="w-12 h-12 bg-blue-50 text-blue-600 rounded-xl flex items-center justify-center mx-auto mb-4"><Icon name="upload-cloud" size={24} /></div>
                                         <h3 className="text-lg font-bold text-slate-900 mb-2">Upload CSV</h3>
-                                        <button 
-                                            onClick={() => fileRef.current.click()}
-                                            className="bg-slate-900 hover:bg-slate-800 text-white px-8 py-3 rounded-lg font-bold shadow-lg shadow-slate-200 transition active:scale-95"
-                                        >
-                                            Select File
-                                        </button>
+                                        <button onClick={() => fileRef.current.click()} className="bg-slate-900 hover:bg-slate-800 text-white px-8 py-3 rounded-lg font-bold shadow-lg shadow-slate-200 transition active:scale-95">Select File</button>
                                         <input type="file" ref={fileRef} onChange={handleFile} accept=".csv" className="hidden" />
                                     </div>
                                 )}
@@ -562,25 +563,16 @@
                             </div>
                         ) : (
                             <main className="max-w-6xl mx-auto px-6 mt-10 space-y-8 animate-slide-up">
-                                {/* Header Stats */}
                                 <div className="flex flex-col md:flex-row justify-between items-end border-b border-slate-200 pb-4 gap-4">
-                                    <div>
-                                        <h2 className="text-2xl font-bold text-slate-900">Performance Report</h2>
-                                        <p className="text-slate-500 text-sm mt-1">{data.metrics.totalTrades} trades analyzed</p>
-                                    </div>
+                                    <div><h2 className="text-2xl font-bold text-slate-900">Performance Report</h2><p className="text-slate-500 text-sm mt-1">{data.metrics.totalTrades} trades analyzed</p></div>
                                     <div className="flex gap-2">
-                                        {!data.hasCharges && (
-                                            <span className="text-xs bg-amber-50 text-amber-700 px-3 py-1.5 rounded-full font-bold border border-amber-100 flex items-center gap-1.5">
-                                                <Icon name="info" size={14}/> Gross P&L
-                                            </span>
-                                        )}
+                                        {!data.hasCharges && <span className="text-xs bg-amber-50 text-amber-700 px-3 py-1.5 rounded-full font-bold border border-amber-100 flex items-center gap-1.5"><Icon name="info" size={14}/> Gross P&L</span>}
                                         <button onClick={() => window.print()} className="text-slate-500 hover:text-slate-800 p-2 rounded-full hover:bg-slate-100 no-print"><Icon name="printer" size={20} /></button>
                                     </div>
                                 </div>
 
-                                <ReviewSection metrics={data.metrics} suggestions={data.suggestions} />
+                                <DetailedReview review={data.review} />
 
-                                {/* Main Metrics Grid */}
                                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
                                     <MetricCard label="Net P&L" value={`₹ ${data.metrics.totalPnL.toLocaleString()}`} trend={data.metrics.totalPnL > 0 ? 'good' : 'bad'} icon="wallet" desc={METRIC_INFO["Net P&L"]} />
                                     <MetricCard label="Win Rate" value={`${data.metrics.winRate.toFixed(1)}%`} trend={data.metrics.winRate > 40 ? 'good' : 'bad'} icon="crosshair" desc={METRIC_INFO["Win Rate"]} />
@@ -588,51 +580,36 @@
                                     <MetricCard label="Expectancy" value={`₹ ${data.metrics.expectancy.toFixed(0)}`} trend={data.metrics.expectancy > 0 ? 'good' : 'bad'} icon="target" desc={METRIC_INFO["Expectancy"]} />
                                 </div>
                                 
-                                <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+                                <div className="grid grid-cols-1 md:grid-cols-4 gap-5">
                                     <MetricCard label="Avg Win" value={`₹ ${data.metrics.avgWin.toFixed(0)}`} trend="good" icon="trending-up" desc={METRIC_INFO["Avg Win"]} />
                                     <MetricCard label="Avg Loss" value={`₹ ${data.metrics.avgLoss.toFixed(0)}`} trend="bad" icon="trending-down" desc={METRIC_INFO["Avg Loss"]} />
+                                    <MetricCard label="Risk:Reward" value={`1 : ${data.metrics.rrRatio.toFixed(2)}`} trend={data.metrics.rrRatio > 1.5 ? 'good' : 'neutral'} icon="scale" desc={METRIC_INFO["Risk:Reward"]} />
                                     <MetricCard label="Max Drawdown" value={`₹ ${data.metrics.maxDD.toLocaleString()}`} trend="bad" icon="activity" desc={METRIC_INFO["Max Drawdown"]} />
                                 </div>
 
-                                {/* Charts Row */}
                                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                                     <div className="lg:col-span-2 card p-6">
-                                        <h3 className="font-bold text-slate-900 mb-4 flex items-center gap-2">
-                                            <Icon name="line-chart" size={20} className="text-blue-600" /> Equity Curve
-                                        </h3>
+                                        <h3 className="font-bold text-slate-900 mb-4 flex items-center gap-2"><Icon name="line-chart" size={20} className="text-blue-600" /> Equity Curve</h3>
                                         <div className="h-64"><EquityChart curve={data.equityCurve} /></div>
                                     </div>
                                     <DayAnalysis stats={data.dayStats} />
                                 </div>
 
-                                {/* Details Table */}
                                 <MonthlyTable stats={data.monthlyStats} />
-                                
                             </main>
                         )}
                     </div>
 
-                    {/* PROFESSIONAL FOOTER */}
                     <footer className="mt-20 py-12 bg-white border-t border-slate-200 no-print">
                         <div className="max-w-6xl mx-auto px-6">
                             <div className="flex flex-col md:flex-row justify-between items-center gap-6">
                                 <div className="text-center md:text-left">
-                                    <div className="flex items-center gap-2 justify-center md:justify-start mb-2">
-                                        <div className="bg-slate-900 text-white p-1.5 rounded-lg">
-                                            <Icon name="bar-chart-big" size={18} />
-                                        </div>
-                                        <span className="font-extrabold text-xl text-slate-900 tracking-tight">Trade Audit Pro</span>
-                                    </div>
+                                    <div className="flex items-center gap-2 justify-center md:justify-start mb-2"><div className="bg-slate-900 text-white p-1.5 rounded-lg"><Icon name="bar-chart-big" size={18} /></div><span className="font-extrabold text-xl text-slate-900 tracking-tight">Trade Audit Pro</span></div>
                                     <p className="text-sm text-slate-500">Advanced Trading Performance Analytics</p>
                                 </div>
-                                
                                 <div className="text-center md:text-right">
-                                    <p className="text-sm font-medium text-slate-600 mb-1">
-                                        <span className="font-bold text-blue-600">Trading With Sujay</span>
-                                    </p>
-                                    <p className="text-xs text-slate-400">
-                                        Designed & Developed by <span className="font-semibold text-slate-600">Sujay Sharma</span>
-                                    </p>
+                                    <p className="text-sm font-medium text-slate-600 mb-1"><span className="font-bold text-blue-600">Trading With Sujay</span></p>
+                                    <p className="text-xs text-slate-400">Designed & Developed by <span className="font-semibold text-slate-600">Sujay Sharma</span></p>
                                     <p className="text-[10px] text-slate-300 mt-2">© {new Date().getFullYear()} Sujay Sharma. All rights reserved.</p>
                                 </div>
                             </div>
